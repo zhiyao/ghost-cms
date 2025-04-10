@@ -24,6 +24,10 @@ if [ "$1" == "update" ]; then
     docker-compose pull && docker-compose up -d
 fi
 
+# Assign domain from argument 2 for clarity
+domain="$2"
+ghost_dir="ghost" # Define the target directory name
+
 if [ "$1" == "setup" ]; then
 
     echo '--- Updating System Packages (Idempotent) ---'
