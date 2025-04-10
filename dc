@@ -16,7 +16,7 @@ fi
 if [ "$1" == "setup" ]; then
   echo 'Updating system...' \
   && apt upgrade -y \
-  && rm -rf ghost; git clone https://github.com/clean-docker/ghost-cms ghost \
+  && rm -rf ghost; git clone https://github.com/zhiyao/ghost-cms ghost \
   && cd ghost \
   && sed -e "s/<domain>/$2/g" docker-compose.yml \
   && sed -e "s/<domain>/$2/g" nginx/default.conf \
@@ -35,7 +35,7 @@ if [ "$1" == "setup" ]; then
   && apt update -y \
   && apt-get install docker-ce docker-ce-cli containerd.io -y \
   && echo 'Installing Docker Compose...' \
-  && curl -L https://github.com/docker/compose/releases/download/1.25.4/docker-compose-`uname -s`-`uname -m` -o /usr/local/bin/docker-compose \
+  && curl -L https://github.com/docker/compose/releases/download/2.34.0/docker-compose-`uname -s`-`uname -m` -o /usr/local/bin/docker-compose \
   && chmod +x /usr/local/bin/docker-compose \
   && echo 'Preparing Ghost...' \
   && mkdir ./content; mkdir ./mysql; mkdir -p /usr/share/nginx/html;
@@ -45,6 +45,5 @@ if [ "$1" == "setup" ]; then
   && echo 'Starting Docker...' \
   && docker-compose up -d \
   && echo 'Done! 🎉' \
-  && echo 'by Rafael Correa Gomes' \
   && echo 'Access your host: https://'; echo $2;
 fi
