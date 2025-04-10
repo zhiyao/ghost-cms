@@ -58,18 +58,45 @@ if [ "$1" == "setup" ]; then
     grep -q "<domain>" nginx/default.conf && sed -i "s/<domain>/$domain/g" nginx/default.conf || echo "Domain already set in nginx/default.conf"
     grep -q "<domain>" config.production.json && sed -i "s/<domain>/$domain/g" config.production.json || echo "Domain already set in config.production.json"
 
-    echo '--- Installing Certbot (Idempotent) ---'
-    # Check if certbot command exists
-    if ! command -v certbot &> /dev/null; then
-        echo "Certbot not found, installing..."
-        sudo apt update -y # Ensure lists are fresh before potentially adding PPA
-        sudo apt install software-properties-common -y
-        # Check if PPA exists before adding? More complex, apt usually handles duplicates gracefully.
-        sudo add-apt-repository ppa:certbot/certbot -y
+    echo '--- Installing Certbot using Snap (Recommended & Idempotent) ---'
+    # Check if certbot command is available (snap often needs symlink)
+    # We'll check for snap install status directly for better idempotency
+    if ! sudo snap list | grep -q certbot; then
+        echo "Certbot snap not found, installing..."
+        # 1. Ensure snapd is installed and up-to-date
         sudo apt update -y
-        sudo apt install certbot -y
+        sudo apt install snapd -y
+        sudo snap install core
+        sudo snap refresh core
+
+        # 2. Remove any old OS Certbot packages to avoid conflicts
+        # Use apt remove instead of purge to keep config if needed (though shouldn't matter here)
+        sudo apt remove certbot -y
+
+        # 3. Install Certbot snap
+        # Using --classic allows certbot access outside its normal sandbox (needed)
+        sudo snap install --classic certbot
+
+        # 4. Prepare the certbot command (create symlink)
+        # This ensures 'certbot' can be run directly. Use -sf for idempotency (force overwrite if link exists)
+        sudo ln -sf /snap/bin/certbot /usr/bin/certbot
+        echo "Certbot snap installed."
+
     else
-        echo "Certbot is already installed."
+        echo "Certbot snap is already installed."
+        # Ensure symlink exists if snap is installed but command might be missing
+        if [ ! -L /usr/bin/certbot ]; then
+             echo "Creating symlink for certbot command..."
+             sudo ln -sf /snap/bin/certbot /usr/bin/certbot
+        fi
+    fi
+
+    # Optional: Verify installation (snap takes precedence if symlink exists)
+    if command -v certbot &> /dev/null; then
+         echo "Certbot command found at: $(command -v certbot)"
+    else
+         echo "WARNING: Certbot command not found in PATH, check installation and symlink."
+         # Try running directly from snap path in subsequent steps if needed
     fi
 
     echo "--- Obtaining SSL Certificate for $domain (Idempotent) ---"
