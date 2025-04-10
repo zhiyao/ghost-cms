@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
 
+# Exit script on any error
+set -e
+# Treat unset variables as an error
+set -u
+# Ensure pipeline failures are caught
+set -o pipefail
+
+# --- Configuration ---
+# Use command -v for docker-compose check later
+export PATH=$PATH:/usr/local/bin
+
 if [ "$1" == "start" ]; then
     docker-compose start
 fi
@@ -14,36 +25,149 @@ if [ "$1" == "update" ]; then
 fi
 
 if [ "$1" == "setup" ]; then
-  echo 'Updating system...' \
-  && apt upgrade -y \
-  && rm -rf ghost; git clone https://github.com/zhiyao/ghost-cms ghost \
-  && cd ghost \
-  && sed -e "s/<domain>/$2/g" docker-compose.yml \
-  && sed -e "s/<domain>/$2/g" nginx/default.conf \
-  && sed -e "s/<domain>/$2/g" config.production.json \
-  && echo 'Installing SSL...' \
-  && sudo apt install software-properties-common -y \
-  && sudo add-apt-repository ppa:certbot/certbot -y \
-  && sudo apt update -y \
-  && sudo apt install certbot -y \
-  && sudo certbot certonly --standalone -d $2 \
-  && echo 'Installing Docker...' \
-  && apt install apt-transport-https ca-certificates curl software-properties-common gnupg -y \
-  && curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add - \
-  && apt-key fingerprint 0EBFCD88 \
-  && add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" -y \
-  && apt update -y \
-  && apt-get install docker-ce docker-ce-cli containerd.io -y \
-  && echo 'Installing Docker Compose...' \
-  && curl -L https://github.com/docker/compose/releases/download/2.34.0/docker-compose-`uname -s`-`uname -m` -o /usr/local/bin/docker-compose \
-  && chmod +x /usr/local/bin/docker-compose \
-  && echo 'Preparing Ghost...' \
-  && mkdir ./content; mkdir ./mysql; mkdir -p /usr/share/nginx/html;
-  echo 'Configuring cron...' \
-  && echo "0 23 * * * certbot certonly -n --webroot -w /usr/share/nginx/html -d $2 --deploy-hook='docker exec ghost_nginx_1 nginx -s reload'" >> mycron \
-  && crontab mycron; rm mycron \
-  && echo 'Starting Docker...' \
-  && docker-compose up -d \
-  && echo 'Done! 🎉' \
-  && echo 'Access your host: https://'; echo $2;
+
+    echo '--- Updating System Packages (Idempotent) ---'
+    sudo apt update -y # Run update first
+    sudo apt upgrade -y
+
+    echo "--- Cloning/Updating Ghost CMS Repository ($ghost_dir) ---"
+    if [ -d "$ghost_dir/.git" ]; then
+        echo "Repository '$ghost_dir' exists, updating..."
+        cd "$ghost_dir"
+        git pull # Or use git fetch && git reset --hard origin/main if you want to discard local changes
+        cd .. # Go back to parent directory
+    else
+        echo "Repository '$ghost_dir' not found, cloning..."
+        # Remove directory if it exists but isn't a git repo, or rm fails if it's non-empty
+        rm -rf "$ghost_dir"
+        git clone https://github.com/zhiyao/ghost-cms "$ghost_dir"
+    fi
+
+    # Ensure we are in the correct directory for subsequent commands
+    cd "$ghost_dir"
+
+    echo "--- Configuring Ghost Files (Idempotent) ---"
+    # Use sed -i for in-place editing. Check if domain already exists before replacing.
+    # Using a unique placeholder like <domain> makes this check reliable.
+    # Assuming the original files always contain "<domain>" and not the actual domain.
+    grep -q "<domain>" docker-compose.yml && sed -i "s/<domain>/$domain/g" docker-compose.yml || echo "Domain already set in docker-compose.yml"
+    grep -q "<domain>" nginx/default.conf && sed -i "s/<domain>/$domain/g" nginx/default.conf || echo "Domain already set in nginx/default.conf"
+    grep -q "<domain>" config.production.json && sed -i "s/<domain>/$domain/g" config.production.json || echo "Domain already set in config.production.json"
+
+    echo '--- Installing Certbot (Idempotent) ---'
+    # Check if certbot command exists
+    if ! command -v certbot &> /dev/null; then
+        echo "Certbot not found, installing..."
+        sudo apt update -y # Ensure lists are fresh before potentially adding PPA
+        sudo apt install software-properties-common -y
+        # Check if PPA exists before adding? More complex, apt usually handles duplicates gracefully.
+        sudo add-apt-repository ppa:certbot/certbot -y
+        sudo apt update -y
+        sudo apt install certbot -y
+    else
+        echo "Certbot is already installed."
+    fi
+
+    echo "--- Obtaining SSL Certificate for $domain (Idempotent) ---"
+    # Check if a certificate already exists for the domain
+    if ! sudo certbot certificates | grep -q "Domains: $domain"; then
+        echo "Certificate for $domain not found, obtaining..."
+        # Ensure Nginx/Apache are not running on port 80 if using standalone
+        # Consider stopping conflicting services temporarily if needed, e.g., sudo systemctl stop nginx
+        sudo certbot certonly --standalone --agree-tos --email admin@$domain -d "$domain" --non-interactive
+        # Consider restarting services if stopped: sudo systemctl start nginx
+    else
+        echo "Certificate for $domain already exists."
+        # Optionally force renewal if needed: sudo certbot renew --force-renewal
+    fi
+
+    echo '--- Installing Docker Engine (Idempotent) ---'
+    # Check if docker command exists
+    if ! command -v docker &> /dev/null; then
+        echo "Docker not found, installing..."
+        # Install prerequisites
+        sudo apt update -y
+        sudo apt install apt-transport-https ca-certificates curl software-properties-common gnupg -y
+
+        # Add Docker's official GPG key (New Method)
+        keyring_file="/etc/apt/keyrings/docker.gpg"
+        if [ ! -f "$keyring_file" ]; then
+            echo "Adding Docker GPG key..."
+            sudo install -m 0755 -d /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o "$keyring_file"
+            sudo chmod a+r "$keyring_file"
+        else
+             echo "Docker GPG key already exists."
+        fi
+
+        # Set up the repository (New Method)
+        repo_file="/etc/apt/sources.list.d/docker.list"
+        if [ ! -f "$repo_file" ]; then
+            echo "Adding Docker repository..."
+            echo \
+              "deb [arch=$(dpkg --print-architecture) signed-by=$keyring_file] https://download.docker.com/linux/ubuntu \
+              $(lsb_release -cs) stable" | sudo tee "$repo_file" > /dev/null
+        else
+            echo "Docker repository already configured."
+        fi
+
+        # Install Docker Engine
+        sudo apt update -y
+        sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y # Install compose plugin too
+    else
+        echo "Docker is already installed."
+    fi
+
+    echo '--- Installing Docker Compose (Standalone - Optional if plugin installed) (Idempotent) ---'
+    # Note: docker-compose-plugin installed above provides 'docker compose'
+    # This installs the standalone 'docker-compose' command if needed
+    compose_path="/usr/local/bin/docker-compose"
+    if [ ! -f "$compose_path" ]; then
+        echo "Docker Compose (standalone) not found, installing..."
+        # Define desired version (adjust if needed)
+        compose_version="v2.26.1" # Check for latest stable version if needed
+        sudo curl -L "https://github.com/docker/compose/releases/download/$compose_version/docker-compose-$(uname -s)-$(uname -m)" -o "$compose_path"
+        sudo chmod +x "$compose_path"
+    else
+        echo "Docker Compose (standalone) is already installed at $compose_path."
+    fi
+
+    echo '--- Preparing Ghost Directories (Idempotent) ---'
+    # Ensure these are created within the $ghost_dir
+    mkdir -p ./content
+    mkdir -p ./mysql
+    # This one seems potentially global - ensure it's intended
+    sudo mkdir -p /usr/share/nginx/html
+
+    echo '--- Configuring Cron for SSL Renewal (Idempotent) ---'
+    # Define the cron command, ensuring the path to docker is correct if running as root
+    # Using webroot requires the webroot path to be accessible and nginx running
+    # Note: Changed docker exec hook slightly for potential standalone compose usage
+    cron_command="0 23 * * * sudo certbot renew --webroot -w /usr/share/nginx/html -d $domain --deploy-hook='sudo docker compose -f /path/to/your/ghost/docker-compose.yml restart nginx'" #<-- ADJUST PATH
+    # Check if the specific cron job already exists for the root user
+    if ! sudo crontab -l | grep -qF "$cron_command"; then
+        echo "Adding cron job for SSL renewal..."
+        # Add the job without removing existing ones. Handle empty crontab case.
+        (sudo crontab -l 2>/dev/null || true; echo "$cron_command") | sudo crontab -
+    else
+        echo "Cron job for SSL renewal already exists."
+    fi
+
+    echo '--- Starting Ghost CMS with Docker Compose (Idempotent) ---'
+    # docker-compose up -d is generally idempotent
+    # Assumes we are still in the $ghost_dir
+    # Use `docker compose` (plugin) if preferred over standalone `docker-compose`
+    if command -v docker-compose &> /dev/null; then
+        sudo docker-compose up -d
+    elif command -v docker &> /dev/null && docker compose version &> /dev/null; then
+         sudo docker compose up -d # Use the plugin
+    else
+         echo "ERROR: Cannot find docker-compose or docker compose plugin."
+         exit 1
+    fi
+
+
+    echo '--- Done! 🎉 ---'
+    echo "Access your Ghost CMS instance at: https://$domain"
+
 fi
